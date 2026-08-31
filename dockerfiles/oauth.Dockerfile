@@ -10,5 +10,8 @@ RUN cargo build --release --bin oauth
 
 EXPOSE 3006
 
+RUN useradd -U -u 1000 appuser && chown -R 1000:1000 /app
+USER 1000
+
 # Set a default command, it will start the oauth service if no command is provided
 CMD ["cargo", "run", "--release", "--bin", "oauth"]

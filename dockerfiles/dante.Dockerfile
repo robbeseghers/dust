@@ -21,4 +21,7 @@ EXPOSE 1080
 
 ENTRYPOINT ["dumb-init"]
 
+RUN adduser -D -u 1000 appuser && chown -R 1000:1000 /usr/local
+USER 1000
+
 CMD ["sockd"]

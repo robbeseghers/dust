@@ -10,5 +10,8 @@ RUN cargo build --release --bin core-api --bin sqlite-worker --bin check_table
 
 EXPOSE 3001
 
+RUN useradd -U -u 1000 appuser && chown -R 1000:1000 /app
+USER 1000
+
 # Set a default command, it will start the API service if no command is provided
 CMD ["cargo", "run", "--release", "--bin", "core-api"]

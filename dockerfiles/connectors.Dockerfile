@@ -41,5 +41,8 @@ EXPOSE 3002
 ENV DD_GIT_REPOSITORY_URL=https://github.com/dust-tt/dust/
 ENV DD_GIT_COMMIT_SHA=${COMMIT_HASH_LONG}
 
+RUN chown -R 1000:1000 /sdks/js /app
+USER 1000
+
 # Set a default command, it will start the API service if no command is provided
 CMD ["npm", "run", "start:web"]
