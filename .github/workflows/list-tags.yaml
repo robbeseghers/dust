@@ -45,8 +45,10 @@ jobs:
     steps:
       - name: Set project ID
         id: project
+        env:
+          REGION: ${{ inputs.region }}
         run: |
-          if [ "${{ inputs.region }}" = "us-central1" ]; then
+          if [ "$REGION" = "us-central1" ]; then
             echo "PROJECT_ID=${{ secrets.GCLOUD_US_PROJECT_ID }}" >> $GITHUB_OUTPUT
           else
             echo "PROJECT_ID=${{ secrets.GCLOUD_EU_PROJECT_ID }}" >> $GITHUB_OUTPUT
@@ -64,10 +66,14 @@ jobs:
         uses: "google-github-actions/setup-gcloud@v2"
 
       - name: List available tags
+        env:
+          COMPONENT: ${{ inputs.component }}
+          REGION: ${{ inputs.region }}
+          PROJECT_ID: ${{ steps.project.outputs.PROJECT_ID }}
         run: |
-          echo "Latest tags for ${{ inputs.component }} in ${{ inputs.region }}:"
+          echo "Latest tags for $COMPONENT in $REGION:"
           echo "-------------------------------------------"
-          gcloud container images list-tags "${{ inputs.region }}-docker.pkg.dev/${{ steps.project.outputs.PROJECT_ID }}/dust-images/${{ inputs.component }}" \
+          gcloud container images list-tags "$REGION-docker.pkg.dev/$PROJECT_ID/dust-images/$COMPONENT" \
             --limit=10 \
             --sort-by=~timestamp \
             --format="table(timestamp.date('%Y-%m-%d %H:%M:%S'),tags[0])"

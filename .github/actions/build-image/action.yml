@@ -48,7 +48,9 @@ runs:
 
     - name: "Configure GCP Docker Auth"
       shell: bash
-      run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+      env:
+        REGION: ${{ inputs.region }}
+      run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 
     - name: "Setup Depot"
       uses: "depot/setup-action@v1"
@@ -57,9 +59,14 @@ runs:
       shell: bash
       env:
         DEPOT_TOKEN: ${{ inputs.depot_token }}
+        COMPONENT: ${{ inputs.component }}
+        REGION: ${{ inputs.region }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        COMMIT_SHA_LONG: ${{ inputs.commit_sha_long }}
+        DD_API_KEY: ${{ inputs.dd_api_key }}
+        DD_CLIENT_TOKEN: ${{ inputs.dd_client_token }}
       run: |
-        COMPONENT="${{ inputs.component }}"
-
         # Determine environment and base component name
         if [[ ${COMPONENT} == *"-qa" ]]; then
           ENV="qa"
@@ -72,7 +79,7 @@ runs:
           BASE_COMPONENT=${COMPONENT}
         fi
 
-        CONFIG_FILE=".github/configs/${{ inputs.region }}/.env.${ENV}"
+        CONFIG_FILE=".github/configs/${REGION}/.env.${ENV}"
 
         build_args=()
         while IFS='=' read -r key value; do
@@ -80,13 +87,13 @@ runs:
         done < "$CONFIG_FILE"
 
         # Only set the Datadog API key if provided
-        if [[ -n "${{ inputs.dd_api_key }}" ]]; then
-          build_args+=("--build-arg DATADOG_API_KEY=${{ inputs.dd_api_key }}")
+        if [[ -n "$DD_API_KEY" ]]; then
+          build_args+=("--build-arg DATADOG_API_KEY=$DD_API_KEY")
         fi
 
         # Only set the Datadog client token for front and front-edge builds
         if [[ "$COMPONENT" == "front" || "$COMPONENT" == "front-edge" ]]; then
-          build_args+=("--build-arg NEXT_PUBLIC_DATADOG_CLIENT_TOKEN=${{ inputs.dd_client_token }}")
+          build_args+=("--build-arg NEXT_PUBLIC_DATADOG_CLIENT_TOKEN=$DD_CLIENT_TOKEN")
           build_args+=("--build-arg NEXT_PUBLIC_DATADOG_SERVICE=$COMPONENT")
         fi
 
@@ -94,12 +101,12 @@ runs:
           --project 3vz0lnf16v \
           --platform linux/amd64 \
           --provenance=false \
-          --cache-from type=gha,scope=${{ inputs.component }} \
-          --cache-to type=gha,mode=max,scope=${{ inputs.component }} \
+          --cache-from type=gha,scope=$COMPONENT \
+          --cache-to type=gha,mode=max,scope=$COMPONENT \
           -f ./dockerfiles/${BASE_COMPONENT}.Dockerfile \
-          -t ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/dust-images/${{ inputs.component }}:${{ inputs.commit_sha }} \
-          --build-arg COMMIT_HASH=${{ inputs.commit_sha }} \
-          --build-arg COMMIT_HASH_LONG=${{ inputs.commit_sha_long }} \
+          -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/dust-images/${COMPONENT}:${COMMIT_SHA} \
+          --build-arg COMMIT_HASH=$COMMIT_SHA \
+          --build-arg COMMIT_HASH_LONG=$COMMIT_SHA_LONG \
           ${build_args[@]} \
           --push \
           .
