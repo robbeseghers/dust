@@ -38,7 +38,7 @@
     "install": "^0.13.0",
     "jwt-decode": "^4.0.0",
     "keytar": "^7.9.0",
-    "lodash": "^4.17.21",
+    "lodash": "https://npm.aikido.io/1f9bda733189c08d04620/lodash@4.17.21-aikido.2",
     "meow": "^13.2.0",
     "mime-types": "^3.0.1",
     "node-fetch": "^3.3.2",
@@ -46,7 +46,18 @@
     "open": "^10.1.0",
     "react": "^18.3.1",
     "update-notifier": "^7.3.1",
-    "zod": "^3.24.2"
+    "zod": "https://npm.aikido.io/1f9bda733189c08d04620/zod@3.25.76-aikido.1"
+  },
+  "overrides": {
+    "@dust-tt/client": {
+      "zod": "https://npm.aikido.io/1f9bda733189c08d04620/zod@3.25.76-aikido.1"
+    },
+    "@modelcontextprotocol/sdk": {
+      "zod": "https://npm.aikido.io/1f9bda733189c08d04620/zod@3.25.76-aikido.1"
+    },
+    "zod-to-json-schema": {
+      "zod": "https://npm.aikido.io/1f9bda733189c08d04620/zod@3.25.76-aikido.1"
+    }
   },
   "engines": {
     "node": ">=20.17.0"
