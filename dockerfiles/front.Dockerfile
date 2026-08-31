@@ -68,4 +68,7 @@ ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 ENV DD_GIT_REPOSITORY_URL=https://github.com/dust-tt/dust/
 ENV DD_GIT_COMMIT_SHA=${COMMIT_HASH_LONG}
 
+RUN chown -R 1000:1000 /sdks/js /app
+USER 1000
+
 CMD ["npm", "--silent", "run", "start"]

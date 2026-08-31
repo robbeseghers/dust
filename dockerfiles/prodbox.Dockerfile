@@ -48,5 +48,8 @@ RUN echo "export PS1='\[\e[0;31m\]prodbox\[\e[0m\]:\w\$ '" >> /root/.bashrc
 
 ENV GIT_SSH_COMMAND="ssh -i ~/.ssh/github-deploykey-deploybox"
 
+RUN chown -R 1000:1000 /dust
+USER 1000
+
 # Set a default command
 CMD ["/dust/prodbox/init.sh"]
