@@ -1,0 +1,26 @@
+{
+  "apiFolder": "pages/api",
+  "schemaFolders": ["lib/models/"],
+  "definition": {
+    "openapi": "3.0.0",
+    "info": {
+      "title": "DUST API Documentation",
+      "version": "1.0.2",
+      "description": "The OpenAPI specification for the Dust.tt API",
+      "license": {
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT"
+      }
+    },
+    "servers": [
+      {
+        "url": "https://dust.tt",
+        "description": "Dust.tt API (us-central1)"
+      },
+      {
+        "url": "https://eu.dust.tt",
+        "description": "Dust.tt API (europe-west1)"
+      }
+    ]
+  }
+}

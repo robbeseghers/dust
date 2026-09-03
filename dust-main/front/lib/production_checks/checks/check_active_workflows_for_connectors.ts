@@ -1,0 +1,140 @@
+import type { Client, WorkflowHandle } from "@temporalio/client";
+import { QueryTypes } from "sequelize";
+
+import type { CheckFunction } from "@app/lib/production_checks/types";
+import { getConnectorsPrimaryDbConnection } from "@app/lib/production_checks/utils";
+import { getTemporalClientForConnectorsNamespace } from "@app/lib/temporal";
+import type { ConnectorProvider } from "@app/types";
+import {
+  getIntercomSyncWorkflowId,
+  getZendeskGarbageCollectionWorkflowId,
+  getZendeskSyncWorkflowId,
+  googleDriveIncrementalSyncWorkflowId,
+  makeConfluenceSyncWorkflowId,
+  microsoftGarbageCollectionWorkflowId,
+  microsoftIncrementalSyncWorkflowId,
+} from "@app/types";
+
+interface ConnectorBlob {
+  id: number;
+  dataSourceId: string;
+  workspaceId: string;
+  pausedAt: Date | null;
+}
+
+interface ProviderCheck {
+  makeIdsFn: (connector: ConnectorBlob) => string[];
+}
+
+const connectorsDb = getConnectorsPrimaryDbConnection();
+
+const providersToCheck: Partial<Record<ConnectorProvider, ProviderCheck>> = {
+  confluence: {
+    makeIdsFn: (connector: ConnectorBlob) => [
+      makeConfluenceSyncWorkflowId(connector.id),
+    ],
+  },
+  intercom: {
+    makeIdsFn: (connector: ConnectorBlob) => [
+      getIntercomSyncWorkflowId(connector.id),
+    ],
+  },
+  google_drive: {
+    makeIdsFn: (connector: ConnectorBlob) => [
+      googleDriveIncrementalSyncWorkflowId(connector.id),
+    ],
+  },
+  microsoft: {
+    makeIdsFn: (connector: ConnectorBlob) => [
+      microsoftIncrementalSyncWorkflowId(connector.id),
+      microsoftGarbageCollectionWorkflowId(connector.id),
+    ],
+  },
+  zendesk: {
+    makeIdsFn: (connector: ConnectorBlob) => [
+      getZendeskSyncWorkflowId(connector.id),
+      getZendeskGarbageCollectionWorkflowId(connector.id),
+    ],
+  },
+};
+
+async function listAllConnectorsForProvider(provider: ConnectorProvider) {
+  const connectors: ConnectorBlob[] = await connectorsDb.query(
+    `SELECT id, "dataSourceId", "workspaceId", "pausedAt" FROM connectors WHERE "type" = :provider and  "errorType" IS NULL`,
+    {
+      type: QueryTypes.SELECT,
+      replacements: {
+        provider,
+      },
+    }
+  );
+
+  return connectors;
+}
+
+async function areTemporalWorkflowsRunning(
+  client: Client,
+  connector: ConnectorBlob,
+  info: ProviderCheck
+) {
+  for (const workflowId of info.makeIdsFn(connector)) {
+    try {
+      const workflowHandle: WorkflowHandle =
+        client.workflow.getHandle(workflowId);
+
+      const descriptions = await Promise.all([workflowHandle.describe()]);
+
+      return descriptions.every(({ status: { name } }) => name === "RUNNING");
+    } catch (err) {
+      return false;
+    }
+  }
+}
+
+export const checkActiveWorkflows: CheckFunction = async (
+  _checkName,
+  logger,
+  reportSuccess,
+  reportFailure,
+  heartbeat
+) => {
+  for (const [provider, info] of Object.entries(providersToCheck)) {
+    const connectors = await listAllConnectorsForProvider(
+      provider as ConnectorProvider
+    );
+
+    logger.info(`Found ${connectors.length} ${provider} connectors.`);
+
+    const client = await getTemporalClientForConnectorsNamespace();
+
+    const missingActiveWorkflows: any[] = [];
+    for (const connector of connectors) {
+      if (connector.pausedAt) {
+        continue;
+      }
+      heartbeat();
+
+      const isActive = await areTemporalWorkflowsRunning(
+        client,
+        connector,
+        info
+      );
+      if (!isActive) {
+        missingActiveWorkflows.push({
+          connectorId: connector.id,
+          workspaceId: connector.workspaceId,
+          dataSourceId: connector.dataSourceId,
+        });
+      }
+    }
+
+    if (missingActiveWorkflows.length > 0) {
+      reportFailure(
+        { missingActiveWorkflows },
+        `Missing ${provider} temporal workflows.`
+      );
+    } else {
+      reportSuccess({});
+    }
+  }
+};

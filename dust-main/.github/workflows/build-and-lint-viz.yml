@@ -1,0 +1,24 @@
+name: Lint & Build (viz)
+
+on:
+  push:
+    paths:
+      - viz/**
+      - .github/workflows/build-and-lint-viz.yml
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-eslint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 20.13.0
+          cache: "npm"
+          cache-dependency-path: ./viz/package-lock.json
+      - working-directory: viz
+        run: npm install && npm run build && npm run lint

@@ -1,0 +1,238 @@
+import {
+  isMCPConfigurationForRunAgent,
+  isServerSideMCPServerConfiguration,
+} from "@app/lib/actions/types/guards";
+import { getAgentConfiguration } from "@app/lib/api/assistant/configuration/agent";
+import {
+  createConversation,
+  postUserMessage,
+} from "@app/lib/api/assistant/conversation";
+import { Authenticator } from "@app/lib/auth";
+import { ConversationResource } from "@app/lib/resources/conversation_resource";
+import { MCPServerViewResource } from "@app/lib/resources/mcp_server_view_resource";
+import { TriggerResource } from "@app/lib/resources/trigger_resource";
+import { getTemporalClientForAgentNamespace } from "@app/lib/temporal";
+import logger from "@app/logger/logger";
+import { makeScheduleId } from "@app/temporal/agent_schedule/client";
+import type { AgentConfigurationType } from "@app/types";
+import type { TriggerType } from "@app/types/assistant/triggers";
+
+/**
+ * We want to create individual conversations if the agent outcome will vary from user to user.
+ */
+async function shouldCreateIndividualConversations(
+  auth: Authenticator,
+  agentConfiguration: AgentConfigurationType,
+  checkedAgentConfigurationIds: string[] = []
+): Promise<boolean> {
+  // Check if one of the actions is using a personal actions or a run agent action
+  const mcpServerViews = await MCPServerViewResource.listByWorkspace(auth);
+  const mcpServerViewsMap = new Map(
+    mcpServerViews.map((mcpServerView) => [mcpServerView.sId, mcpServerView])
+  );
+  for (const action of agentConfiguration.actions) {
+    if (isServerSideMCPServerConfiguration(action)) {
+      const mcpServerView = mcpServerViewsMap.get(action.mcpServerViewId);
+      if (!mcpServerView) {
+        throw new Error(
+          `MCP server view with ID ${action.mcpServerViewId} not found.`
+        );
+      }
+      if (mcpServerView.oAuthUseCase === "personal_actions") {
+        return true;
+      }
+      // Check the chain of agents
+      if (
+        isMCPConfigurationForRunAgent(action) &&
+        action.childAgentId &&
+        // Avoid infinite loop
+        !checkedAgentConfigurationIds.includes(action.childAgentId)
+      ) {
+        const subAgentConfiguration = await getAgentConfiguration(auth, {
+          agentId: action.childAgentId,
+          variant: "full",
+        });
+        if (subAgentConfiguration) {
+          const subCheck = await shouldCreateIndividualConversations(
+            auth,
+            subAgentConfiguration,
+            [...checkedAgentConfigurationIds, agentConfiguration.sId]
+          );
+          if (subCheck) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+const createConversationForAgentConfiguration = async (
+  auth: Authenticator,
+  agentConfiguration: AgentConfigurationType,
+  trigger: TriggerType,
+  lastRunAt: Date | null = null
+) => {
+  const newConversation = await createConversation(auth, {
+    title: `@${agentConfiguration.name} scheduled call - ${new Date().toLocaleDateString()}`,
+    visibility: "unlisted",
+    triggerId: trigger.id,
+  });
+
+  const baseContext = {
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC",
+    username: auth.getNonNullableUser().username,
+    fullName: auth.getNonNullableUser().fullName(),
+    email: auth.getNonNullableUser().email,
+    profilePictureUrl: null,
+    origin: null,
+  };
+
+  // Build schedule context information
+  const currentDate = new Date();
+  const scheduleContext = lastRunAt
+    ? `**Schedule Context:**\n- Current execution: ${currentDate.toISOString()}\n- Last scheduled run: ${lastRunAt.toISOString()}\n\n`
+    : `**Schedule Context:**\n- Current execution: ${currentDate.toISOString()}\n- This is the first scheduled run for this agent\n\n`;
+
+  const messageRes = await postUserMessage(auth, {
+    conversation: newConversation,
+    content:
+      scheduleContext +
+      `:mention[${agentConfiguration.name}]{${agentConfiguration.sId}}` +
+      (trigger.customPrompt ? `\n\n${trigger.customPrompt}` : ""),
+    mentions: [{ configurationId: agentConfiguration.sId }],
+    context: baseContext,
+    skipToolsValidation: false,
+  });
+
+  if (messageRes.isErr()) {
+    logger.error(
+      {
+        agentConfigurationId: trigger.agentConfigurationId,
+        conversationId: newConversation.sId,
+        error: messageRes.error,
+        trigger,
+      },
+      "scheduledAgentCallActivity: Error sending message."
+    );
+    return;
+  }
+
+  return newConversation;
+};
+
+export async function runScheduledAgentsActivity(
+  userId: string,
+  workspaceId: string,
+  trigger: TriggerType
+) {
+  const auth = await Authenticator.fromUserIdAndWorkspaceId(
+    userId,
+    workspaceId
+  );
+
+  if (!auth.workspace() || !auth.user()) {
+    throw new Error("Invalid authentication. Missing workspaceId or userId.");
+  }
+
+  const agentConfiguration = await getAgentConfiguration(auth, {
+    agentId: trigger.agentConfigurationId,
+    variant: "full",
+  });
+
+  if (!agentConfiguration) {
+    throw new Error(
+      `Agent configuration with ID ${trigger.agentConfigurationId} not found in workspace ${auth.getNonNullableWorkspace().id}.`
+    );
+  }
+
+  const useIndividualConversations = await shouldCreateIndividualConversations(
+    auth,
+    agentConfiguration
+  );
+
+  const triggerResource = await TriggerResource.fetchById(auth, trigger.sId);
+  if (!triggerResource) {
+    throw new Error(`Trigger with ID ${trigger.sId} not found.`);
+  }
+
+  const subscribers = await triggerResource.getSubscribers(auth);
+  if (subscribers.isErr()) {
+    throw new Error("Error getting trigger subscribers.");
+  }
+
+  const client = await getTemporalClientForAgentNamespace();
+  const scheduleId = makeScheduleId(
+    auth.getNonNullableWorkspace().sId,
+    trigger.sId
+  );
+
+  let lastRunAt: Date | null = null;
+  try {
+    const handle = client.schedule.getHandle(scheduleId);
+    const schedule = await handle.describe();
+
+    const recentActions = schedule.info.recentActions;
+    lastRunAt =
+      recentActions.length > 0
+        ? recentActions[recentActions.length - 2].takenAt // -2 to get the last completed action, -1 is the current running action
+        : null;
+  } catch (error) {
+    // We can ignore this error, schedule might not have run yet.
+  }
+
+  const subscribersAuths = await Promise.all(
+    subscribers.value.map((s) =>
+      Authenticator.fromUserIdAndWorkspaceId(
+        s.sId,
+        auth.getNonNullableWorkspace().sId
+      )
+    )
+  );
+
+  if (useIndividualConversations) {
+    // Create conversations for the editor and all the subscribers
+    for (const tempAuth of [auth, ...subscribersAuths]) {
+      try {
+        await createConversationForAgentConfiguration(
+          tempAuth,
+          agentConfiguration,
+          trigger,
+          lastRunAt
+        );
+      } catch (error) {
+        // Might happen if a subscriber do not have the right permissions to use the agent
+        logger.error(
+          {
+            error,
+            agentConfigurationId: trigger.agentConfigurationId,
+            userId: tempAuth.getNonNullableUser().sId,
+            workspaceId: tempAuth.getNonNullableWorkspace().sId,
+          },
+          "Error creating conversation for agent configuration."
+        );
+      }
+    }
+  } else {
+    // Create a single conversation for the editor
+    const conversation = await createConversationForAgentConfiguration(
+      auth,
+      agentConfiguration,
+      trigger,
+      lastRunAt
+    );
+    if (!conversation) {
+      throw new Error("Error creating conversation.");
+    }
+
+    // Upsert all the subscribers as participants
+    for (const tempAuth of subscribersAuths) {
+      await ConversationResource.upsertParticipation(tempAuth, {
+        conversation,
+        action: "subscribed",
+      });
+    }
+  }
+}

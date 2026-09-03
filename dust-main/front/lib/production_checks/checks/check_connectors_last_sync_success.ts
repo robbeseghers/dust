@@ -1,0 +1,97 @@
+import { QueryTypes } from "sequelize";
+
+import { isWebhookBasedProvider } from "@app/lib/connector_providers";
+import type { CheckFunction } from "@app/lib/production_checks/types";
+import { getConnectorsPrimaryDbConnection } from "@app/lib/production_checks/utils";
+import type { ConnectorProvider } from "@app/types";
+
+interface ConnectorBlob {
+  id: number;
+  type: ConnectorProvider;
+  createdAt: Date;
+  dataSourceId: string;
+  workspaceId: string;
+  pausedAt: Date | null;
+  lastSyncSuccessfulTime: Date | null;
+  lastSyncStartTime: Date | null;
+}
+
+const connectorsDb = getConnectorsPrimaryDbConnection();
+
+async function listAllConnectors() {
+  const connectors: ConnectorBlob[] = await connectorsDb.query(
+    `SELECT id, "dataSourceId", "workspaceId", "pausedAt", "lastSyncSuccessfulTime", "lastSyncStartTime", "createdAt", "type" FROM connectors WHERE "errorType" IS NULL AND "pausedAt" IS NULL AND "type" <> 'webcrawler'`,
+    {
+      type: QueryTypes.SELECT,
+    }
+  );
+  return connectors;
+}
+
+function isLastSyncSuccessfullOrStartLessFresh(connector: ConnectorBlob) {
+  const oneWeek = 7 * 24 * 60 * 60 * 1000;
+
+  // If we have a lastSyncSuccessfulTime and it's less than a week old then we're good.
+  if (
+    connector.lastSyncSuccessfulTime &&
+    Date.now() - connector.lastSyncSuccessfulTime.getTime() < oneWeek
+  ) {
+    return true;
+  }
+
+  // If the last sync started less than a week ago, we're good.
+  if (
+    connector.lastSyncStartTime &&
+    Date.now() - connector.lastSyncStartTime.getTime() < oneWeek
+  ) {
+    return true;
+  }
+
+  // If the connector was created less than a week ago, we're good.
+  if (Date.now() - connector.createdAt.getTime() < oneWeek) {
+    return true;
+  }
+
+  return false;
+}
+
+export const checkConnectorsLastSyncSuccess: CheckFunction = async (
+  _checkName,
+  _logger,
+  reportSuccess,
+  reportFailure,
+  heartbeat
+) => {
+  const stalledLastSyncConnectors: any[] = [];
+  const connectors = (await listAllConnectors()).filter(
+    (connector) =>
+      // Ignore webhook-based connectors and webcrawlers
+      !isWebhookBasedProvider(connector.type) &&
+      connector.type !== "webcrawler" &&
+      connector.type !== "slack_bot"
+  );
+  heartbeat();
+
+  for (const connector of connectors) {
+    const isFresh = isLastSyncSuccessfullOrStartLessFresh(connector);
+    if (!isFresh) {
+      stalledLastSyncConnectors.push({
+        provider: connector.type,
+        connectorId: connector.id,
+        workspaceId: connector.workspaceId,
+        dataSourceId: connector.dataSourceId,
+        createdAt: connector.createdAt,
+        lastSyncSuccessfulTime: connector.lastSyncSuccessfulTime,
+      });
+    }
+  }
+
+  if (stalledLastSyncConnectors.length > 0) {
+    reportFailure(
+      { stalledLastSyncConnectors },
+      `Connectors have not synced in the last week.`
+    );
+  } else {
+    reportSuccess({});
+  }
+};

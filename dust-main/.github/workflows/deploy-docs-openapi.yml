@@ -1,0 +1,20 @@
+name: Deploy OpenAPI Docs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  rdme-openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo 📚
+        uses: actions/checkout@v3
+
+      - name: Run `openapi` command 🚀
+        uses: readmeio/rdme@v8
+        with:
+          rdme: openapi front/public/swagger.json --version=v1.1 --key=${{ secrets.README_API_KEY }} --id=66cee36af1922700458e4678

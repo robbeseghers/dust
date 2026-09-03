@@ -1,0 +1,579 @@
+name: Build & Release SlapMac
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  APP_NAME: SlapMac
+
+jobs:
+  # ============================================================
+  # Job 0: Validate Tag/Version Consistency
+  # ============================================================
+  validate-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Sync versions from release tag
+        run: python3 scripts/sync-version.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Validate release tag matches VERSION and app versions
+        run: python3 scripts/check-version-consistency.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Validate i18n coverage
+        run: python3 scripts/validate-i18n.py
+
+      - name: Validate platform i18n resources
+        run: python3 scripts/validate-platform-i18n.py
+
+      - name: Validate i18n consistency across platforms
+        run: python3 scripts/check-i18n-consistency.py
+
+  # ============================================================
+  # Job 1: Build macOS App
+  # ============================================================
+  build-macos:
+    needs: validate-version
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Sync versions from release tag
+        run: python3 scripts/sync-version.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Setup resources
+        run: |
+          mkdir -p SlapMac/SlapMac/Resources
+          cp audio/* SlapMac/SlapMac/Resources/ 2>/dev/null || true
+          cp qrcode/* SlapMac/SlapMac/Resources/ 2>/dev/null || true
+
+      - name: Build macOS app
+        run: |
+          cd SlapMac
+          xcodebuild -project SlapMac.xcodeproj \
+            -scheme SlapMac \
+            -configuration Release \
+            -derivedDataPath ../build-macos \
+            -arch arm64 -arch x86_64 \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
+            2>&1 | tee ../build-macos.log
+
+      - name: Verify build output
+        run: |
+          APP_PATH="build-macos/Build/Products/Release/SlapMac.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Build failed - SlapMac.app not found"
+            cat build-macos.log
+            exit 1
+          fi
+          echo "✅ Build successful"
+          ls -la "$APP_PATH"
+
+      - name: Create DMG
+        run: |
+          APP_PATH="build-macos/Build/Products/Release/SlapMac.app"
+          DMG_DIR="dmg-staging"
+          mkdir -p "$DMG_DIR"
+          cp -R "$APP_PATH" "$DMG_DIR/"
+          
+          # Create Applications symlink for drag-install
+          ln -s /Applications "$DMG_DIR/Applications"
+          
+          hdiutil create -volname "SlapMac" \
+            -srcfolder "$DMG_DIR" \
+            -ov -format UDZO \
+            "SlapMac-macOS.dmg"
+
+      - name: Create ZIP fallback
+        run: |
+          APP_PATH="build-macos/Build/Products/Release/SlapMac.app"
+          cd "$(dirname "$APP_PATH")"
+          zip -r "$GITHUB_WORKSPACE/SlapMac-macOS.zip" SlapMac.app
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-build
+          path: |
+            SlapMac-macOS.dmg
+            SlapMac-macOS.zip
+          retention-days: 5
+
+  # ============================================================
+  # Job 2: Build Windows App
+  # ============================================================
+  build-windows:
+    needs: validate-version
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Sync versions from release tag
+        shell: pwsh
+        run: python scripts/sync-version.py --tag "${env:GITHUB_REF_NAME}"
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup resources
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "SlapMac-Windows/Resources"
+          Copy-Item "audio/*" "SlapMac-Windows/Resources/" -ErrorAction SilentlyContinue
+          Copy-Item "qrcode/*" "SlapMac-Windows/Resources/" -ErrorAction SilentlyContinue
+
+      - name: Restore dependencies
+        run: dotnet restore SlapMac-Windows/SlapMac.csproj
+
+      - name: Build Windows app (x64)
+        run: |
+          dotnet publish SlapMac-Windows/SlapMac.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -o publish/win-x64
+        shell: pwsh
+
+      - name: Build Windows app (arm64)
+        run: |
+          dotnet publish SlapMac-Windows/SlapMac.csproj `
+            -c Release `
+            -r win-arm64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -o publish/win-arm64
+        shell: pwsh
+
+      - name: Copy resources to publish
+        shell: pwsh
+        run: |
+          # Ensure Resources are alongside exe
+          foreach ($arch in @("win-x64", "win-arm64")) {
+            $pubDir = "publish/$arch"
+            if (Test-Path $pubDir) {
+              New-Item -ItemType Directory -Force -Path "$pubDir/Resources"
+              Copy-Item "audio/*" "$pubDir/Resources/" -ErrorAction SilentlyContinue
+              Copy-Item "qrcode/*" "$pubDir/Resources/" -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Package Windows x64
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "publish/win-x64/*" -DestinationPath "SlapMac-Windows-x64.zip" -Force
+
+      - name: Package Windows arm64
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "publish/win-arm64/*" -DestinationPath "SlapMac-Windows-arm64.zip" -Force
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-build
+          path: |
+            SlapMac-Windows-x64.zip
+            SlapMac-Windows-arm64.zip
+          retention-days: 5
+
+  # ============================================================
+  # Job 3: Build Chrome Extension
+  # ============================================================
+  build-extension:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Sync versions from release tag
+        run: python3 scripts/sync-version.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Setup extension resources
+        run: |
+          mkdir -p SlapMac-Extension/audio
+          mkdir -p SlapMac-Extension/images
+          cp audio/* SlapMac-Extension/audio/ 2>/dev/null || true
+          cp qrcode/* SlapMac-Extension/images/ 2>/dev/null || true
+
+      - name: Generate extension icons
+        run: |
+          # Install ImageMagick for icon generation
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick
+
+          cd SlapMac-Extension/icons
+
+          # Create a proper icon from SVG (ImageMagick v6 uses 'convert')
+          if [ -f icon.svg ]; then
+            convert icon.svg -resize 16x16 icon16.png
+            convert icon.svg -resize 48x48 icon48.png
+            convert icon.svg -resize 128x128 icon128.png
+          else
+            # Fallback: create simple colored icons
+            for size in 16 48 128; do
+              convert -size ${size}x${size} \
+                gradient:'#e94560'-'#ff6b6b' \
+                -gravity center \
+                icon${size}.png
+            done
+          fi
+
+      - name: Validate manifest.json
+        run: |
+          python3 -c "
+          import json, sys
+          with open('SlapMac-Extension/manifest.json') as f:
+              m = json.load(f)
+          assert m['manifest_version'] == 3, 'Must be Manifest V3'
+          assert 'storage' in m.get('permissions', []), 'Missing storage permission'
+          print('✅ manifest.json valid')
+          print(f'  Name: {m[\"name\"]}')
+          print(f'  Version: {m[\"version\"]}')
+          "
+
+      - name: Package extension
+        run: |
+          cd SlapMac-Extension
+          zip -r ../SlapMac-Extension.zip . \
+            -x "*.sh" \
+            -x "*.svg" \
+            -x ".DS_Store" \
+            -x "__MACOSX/*"
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: extension-build
+          path: SlapMac-Extension.zip
+          retention-days: 5
+
+  # ============================================================
+  # Job 4: Build iOS App
+  # ============================================================
+  build-ios:
+    needs: validate-version
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Sync versions from release tag
+        run: python3 scripts/sync-version.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Setup resources
+        run: |
+          mkdir -p SlapMac-iOS/SlapMac/Resources
+          cp audio/* SlapMac-iOS/SlapMac/Resources/ 2>/dev/null || true
+          cp qrcode/* SlapMac-iOS/SlapMac/Resources/ 2>/dev/null || true
+
+      - name: Generate Xcode project
+        run: cd SlapMac-iOS && xcodegen generate
+
+      - name: Build iOS app
+        run: |
+          cd SlapMac-iOS
+          xcodebuild -project SlapMac-iOS.xcodeproj \
+            -scheme SlapMac \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ../build-ios \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tail -20
+
+      - name: Package iOS build
+        run: |
+          APP_DIR="build-ios/Build/Products/Release-iphoneos"
+          if [ -d "$APP_DIR" ]; then
+            cd "$APP_DIR"
+            zip -r "$GITHUB_WORKSPACE/SlapMac-iOS.zip" . -x "*.dSYM/*"
+          else
+            echo "::warning::iOS build output not found, creating placeholder"
+            echo "iOS build requires code signing for device deployment" > ios-note.txt
+            zip SlapMac-iOS.zip ios-note.txt
+          fi
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ios-build
+          path: SlapMac-iOS.zip
+          retention-days: 5
+
+  # ============================================================
+  # Job 5: Build Android App
+  # ============================================================
+  build-android:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Sync versions from release tag
+        run: python3 scripts/sync-version.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '8.5'
+
+      - name: Setup audio assets
+        run: |
+          mkdir -p SlapMac-Android/app/src/main/assets/audio
+          mkdir -p SlapMac-Android/app/src/main/assets/qrcode
+          cp audio/* SlapMac-Android/app/src/main/assets/audio/ 2>/dev/null || true
+          cp qrcode/* SlapMac-Android/app/src/main/assets/qrcode/ 2>/dev/null || true
+
+      - name: Generate Gradle wrapper
+        working-directory: SlapMac-Android
+        run: gradle wrapper --gradle-version 8.5
+
+      - name: Build Android APK
+        working-directory: SlapMac-Android
+        run: ./gradlew assembleDebug
+
+      - name: Package Android APK
+        run: |
+          APK=$(find SlapMac-Android -name "*.apk" -type f | head -1)
+          if [ -n "$APK" ]; then
+            cp "$APK" SlapMac-Android.apk
+          else
+            echo "::warning::APK not found"
+          fi
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: android-build
+          path: SlapMac-Android.apk
+          retention-days: 5
+          if-no-files-found: warn
+
+  # ============================================================
+  # Job 6: Build Linux App
+  # ============================================================
+  build-linux:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Sync versions from release tag
+        run: python3 scripts/sync-version.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libportaudio2 portaudio19-dev python3-tk
+
+      - name: Install Python dependencies
+        run: pip install -r SlapMac-Linux/requirements.txt
+
+      - name: Verify imports
+        run: |
+          cd SlapMac-Linux
+          python3 -c "from slap_detector import SlapDetector; print('✅ SlapDetector OK')"
+          python3 -c "from audio_manager import AudioManager; print('✅ AudioManager OK')"
+
+      - name: Package Linux app
+        run: |
+          mkdir -p SlapMac-Linux/resources
+          cp audio/* SlapMac-Linux/resources/ 2>/dev/null || true
+          cp qrcode/* SlapMac-Linux/resources/ 2>/dev/null || true
+          cd SlapMac-Linux
+          zip -r ../SlapMac-Linux.zip . -x "__pycache__/*" "*.pyc"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-build
+          path: SlapMac-Linux.zip
+          retention-days: 5
+
+  # ============================================================
+  # Job 7: Create Release with SHA256 Checksums
+  # ============================================================
+  release:
+    needs: [build-macos, build-windows, build-extension, build-ios, build-android, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.zip" -o -name "*.dmg" -o -name "*.apk" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          echo ""
+          echo "============================================"
+          echo "  SHA256 Checksums"
+          echo "============================================"
+          cat SHA256SUMS.txt
+
+      - name: Verify checksums
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS.txt
+          echo "✅ All checksums verified"
+
+      - name: Determine version
+        id: version
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > RELEASE_NOTES.md << 'RELEASE_EOF'
+          ## 🖐 SlapMac v${VERSION}
+
+          Slap your laptop, hear funny sounds!
+
+          ### 📦 Downloads
+
+          | Platform | File | Architecture |
+          |----------|------|--------------|
+          | 🍎 macOS | `SlapMac-macOS.dmg` | Universal (Intel + Apple Silicon) |
+          | 🍎 macOS | `SlapMac-macOS.zip` | Universal (Intel + Apple Silicon) |
+          | 🪟 Windows | `SlapMac-Windows-x64.zip` | x64 |
+          | 🪟 Windows | `SlapMac-Windows-arm64.zip` | ARM64 |
+          | 📱 iOS | `SlapMac-iOS.zip` | iPhone + iPad |
+          | 🤖 Android | `SlapMac-Android.apk` | All devices |
+          | 🐧 Linux | `SlapMac-Linux.zip` | x64 |
+          | 🌐 Extension | `SlapMac-Extension.zip` | Chrome/Edge/Brave |
+
+          ### 🔐 Verify Downloads (SHA256)
+
+          After downloading, verify file integrity:
+
+          **macOS / Linux:**
+          ```bash
+          sha256sum -c SHA256SUMS.txt
+          # or for a single file:
+          sha256sum SlapMac-macOS.dmg
+          ```
+
+          **Windows PowerShell:**
+          ```powershell
+          Get-FileHash .\SlapMac-Windows-x64.zip -Algorithm SHA256
+          # Compare with SHA256SUMS.txt
+          ```
+
+          ### 📋 Install Instructions
+
+          **macOS:**
+          1. Download `SlapMac-macOS.dmg`
+          2. Open DMG and drag to Applications
+          3. Launch from Applications → appears in menu bar
+
+          **Windows:**
+          1. Download `SlapMac-Windows-x64.zip`
+          2. Extract and run `SlapMac.exe`
+          3. App appears in system tray
+
+          **Chrome Extension:**
+          1. Download `SlapMac-Extension.zip`
+          2. Extract to a folder
+          3. Open `chrome://extensions`
+          4. Enable Developer mode → Load unpacked → select folder
+
+          **Android:**
+          1. Download `SlapMac-Android.apk`
+          2. Enable "Install unknown apps" in Settings
+          3. Open the APK to install
+
+          **Linux:**
+          1. Download `SlapMac-Linux.zip`
+          2. Extract and run `./install.sh`
+          3. Launch with `slapmac` command
+
+          ### ✨ Features
+          - 🖐 Detects physical taps/slaps on your device
+          - 🔊 Plays funny sound effects
+          - 🎚️ Adjustable sensitivity, volume, cooldown
+          - 📊 Slap counter
+          - 🎵 Add custom sounds
+          - ☕ Donate via MoMo/Techcombank QR
+          - 📱 Available on 6 platforms
+          - 🆓 100% Free & Open Source
+          RELEASE_EOF
+
+          # Replace version placeholder
+          sed -i "s/\${VERSION}/$VERSION/g" RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "SlapMac ${{ steps.version.outputs.tag }}"
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          files: |
+            release/SlapMac-macOS.dmg
+            release/SlapMac-macOS.zip
+            release/SlapMac-Windows-x64.zip
+            release/SlapMac-Windows-arm64.zip
+            release/SlapMac-Extension.zip
+            release/SlapMac-iOS.zip
+            release/SlapMac-Android.apk
+            release/SlapMac-Linux.zip
+            release/SHA256SUMS.txt
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

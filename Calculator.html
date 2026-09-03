@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Blush Calculator</title>
+	<style>
+		@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;600;700;800&display=swap');
+		:root { font-family: 'Manrope', sans-serif; color: #481f35; background: #f8e9ee; }
+		* { box-sizing: border-box; }
+		body { min-width: 320px; min-height: 100vh; margin: 0; background: linear-gradient(135deg, #f8e9ee, #fff6f2 52%, #f4d5e1); }
+		body::before { position: fixed; inset: 0; z-index: -1; background-image: radial-gradient(#d6789b .8px, transparent .8px); background-size: 24px 24px; content: ''; opacity: .18; }
+		main { display: grid; min-height: 100vh; place-items: center; padding: 32px 18px; }
+		.calculator { width: min(100%, 420px); padding: 28px; border: 1px solid rgba(255,255,255,.8); border-radius: 28px; background: rgba(255,250,249,.72); box-shadow: 0 28px 70px rgba(157,55,99,.16), 0 3px 10px rgba(157,55,99,.08); backdrop-filter: blur(14px); animation: rise .6s ease-out both; }
+		header { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+		.mark { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 13px; background: #e95c8c; color: white; font-size: 28px; box-shadow: 0 8px 16px rgba(219,58,119,.2); }
+		.eyebrow { margin: 0 0 1px; color: #a55b78; font-size: 10px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+		h1 { margin: 0; color: #481f35; font-size: 22px; letter-spacing: -.04em; } h1 span { color: #e95c8c; }
+		.ready { width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: #61bf91; box-shadow: 0 0 0 4px rgba(97,191,145,.13); }
+		.display { min-height: 142px; padding: 22px 20px; border: 1px solid rgba(192,94,128,.12); border-radius: 18px; background: #fffaf9; text-align: right; }
+		#expression { min-height: 20px; color: #b78397; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+		#result { margin-top: 13px; color: #481f35; font-family: 'DM Mono', monospace; font-size: clamp(38px, 11vw, 52px); line-height: 1; letter-spacing: -.06em; overflow-wrap: anywhere; }
+		.keypad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px; }
+		button { min-height: 58px; border: 0; border-radius: 14px; background: #fbe6ec; color: #57243d; cursor: pointer; font: 700 18px 'Manrope', sans-serif; transition: transform .15s, background .15s, box-shadow .15s; }
+		button:hover { background: #f6d1dc; box-shadow: 0 5px 12px rgba(157,55,99,.1); transform: translateY(-2px); }
+		button:active { transform: translateY(1px); } button:focus-visible { outline: 3px solid #e95c8c; outline-offset: 2px; }
+		.utility { color: #b24e76; background: #f4d4df; font-size: 13px; } .operator { background: #f3aec3; color: #702344; font-size: 23px; }
+		.operator:hover { background: #ed98b3; } .zero { grid-column: span 2; text-align: left; padding-left: 23px; }
+		.equals { background: #e95c8c; color: white; font-size: 24px; box-shadow: 0 8px 16px rgba(219,58,119,.22); } .equals:hover { background: #dd477b; }
+		.hint { margin: 20px 0 0; color: #b78397; font-size: 10px; text-align: center; } .hint span { padding: 0 5px; color: #e95c8c; }
+		@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+		@media (max-width: 390px) { .calculator { padding: 20px; } button { min-height: 54px; } }
+	</style>
+</head>
+<body>
+	<main><section class="calculator" aria-label="Calculator">
+		<header><div class="mark" aria-hidden="true">+</div><div><p class="eyebrow">Daily utility</p><h1>Blush<span>.</span></h1></div><div class="ready" aria-label="Ready"></div></header>
+		<div class="display" aria-live="polite"><div id="expression">Ready when you are</div><div id="result">0</div></div>
+		<div class="keypad">
+			<button class="utility" data-action="clear" type="button">AC</button><button class="utility" data-action="backspace" type="button">DEL</button><button class="utility" data-value="%" type="button">%</button><button class="operator" data-value="÷" type="button">÷</button>
+			<button data-value="7" type="button">7</button><button data-value="8" type="button">8</button><button data-value="9" type="button">9</button><button class="operator" data-value="×" type="button">×</button>
+			<button data-value="4" type="button">4</button><button data-value="5" type="button">5</button><button data-value="6" type="button">6</button><button class="operator" data-value="−" type="button">−</button>
+			<button data-value="1" type="button">1</button><button data-value="2" type="button">2</button><button data-value="3" type="button">3</button><button class="operator" data-value="+" type="button">+</button>
+			<button class="zero" data-value="0" type="button">0</button><button data-value="." type="button">.</button><button class="equals" data-action="equals" type="button">=</button>
+		</div><p class="hint">Keyboard ready <span>•</span> Your calculations stay private</p>
+	</section></main>
+	<script>
+		const expression = document.querySelector('#expression');
+		const result = document.querySelector('#result');
+		let current = '0', previous = null, operator = null, waiting = false;
+		function render() { result.textContent = current; expression.textContent = previous !== null && operator ? `${previous} ${operator}` : 'Ready when you are'; }
+		function digit(value) { if (waiting) { current = value; waiting = false; } else if (current === '0') current = value; else if (current.length < 14) current += value; render(); }
+		function decimal() { if (waiting) { current = '0.'; waiting = false; } else if (!current.includes('.')) current += '.'; render(); }
+		function calculate() { if (previous === null || !operator) return; const a = Number(previous), b = Number(current); const values = {'+': a+b, '−': a-b, '×': a*b, '÷': b === 0 ? NaN : a/b}; const value = values[operator]; current = Number.isFinite(value) ? String(Number(value.toFixed(10))) : 'Error'; previous = null; operator = null; waiting = true; render(); }
+		function choose(next) { if (current === 'Error') clearAll(); if (operator && !waiting) calculate(); previous = current; operator = next; waiting = true; render(); }
+		function clearAll() { current = '0'; previous = null; operator = null; waiting = false; render(); }
+		function backspace() { if (!waiting && current !== 'Error') current = current.length > 1 ? current.slice(0, -1) : '0'; render(); }
+		function percent() { if (current !== 'Error') { current = String(Number(current) / 100); render(); } }
+		document.querySelector('.keypad').addEventListener('click', event => { const button = event.target.closest('button'); if (!button) return; const value = button.dataset.value, action = button.dataset.action; if (action === 'clear') clearAll(); else if (action === 'backspace') backspace(); else if (action === 'equals') calculate(); else if (value === '.') decimal(); else if (['+','−','×','÷'].includes(value)) choose(value); else if (value === '%') percent(); else digit(value); });
+		document.addEventListener('keydown', event => { if (/\d/.test(event.key)) digit(event.key); else if (event.key === '.') decimal(); else if (event.key === 'Enter' || event.key === '=') calculate(); else if (event.key === 'Escape') clearAll(); else if (event.key === 'Backspace') backspace(); else if (event.key === '%') percent(); else if (['+','-','*','/'].includes(event.key)) choose({'-':'−','*':'×','/':'÷'}[event.key] || event.key); });
+		render();
+	</script>
+</body>
+</html>
