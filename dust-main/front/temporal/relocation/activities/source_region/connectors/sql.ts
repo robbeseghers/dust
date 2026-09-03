@@ -92,7 +92,11 @@ export async function readConnectorsTableChunk({
   // We can use the replica db because we don't need to write to it.
   const connectorsDb = getConnectorsPrimaryDbConnection();
 
-  const idClause = lastId ? `AND id > ${lastId}` : "";
+  if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
+    throw new Error("Invalid input");
+  }
+
+  const idClause = lastId ? `AND id > :lastId` : "";
 
   const rows = await connectorsDb.query<{ id: ModelId }>(
     `SELECT * FROM "${tableName}"
@@ -100,7 +104,7 @@ export async function readConnectorsTableChunk({
        ORDER BY id
        LIMIT :limit`,
     {
-      replacements: { connectorId, limit },
+      replacements: lastId ? { connectorId, limit, lastId } : { connectorId, limit },
       type: QueryTypes.SELECT,
       raw: true,
     }

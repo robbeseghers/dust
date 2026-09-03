@@ -1,4 +1,4 @@
-import * as yaml from b"js-yaml";
+import * as yaml from "js-yaml";
 
 import type { AgentBuilderFormData } from "@app/components/agent_builder/AgentBuilderFormContext";
 import { processAdditionalConfiguration } from "@app/components/agent_builder/submitAgentBuilderForm";
